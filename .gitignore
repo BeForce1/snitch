@@ -1,0 +1,11 @@
+# snitch writes its state and log to %LOCALAPPDATA%\snitch, never into the repo.
+# These patterns exist only in case someone points $LogDir here while debugging.
+snitch.log
+posture.json
+netdiary.txt
+
+# editors / os
+.vs/
+.idea/
+Thumbs.db
+desktop.ini

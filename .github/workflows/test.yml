@@ -1,0 +1,31 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax check
+        shell: powershell
+        run: |
+          # Parse every script without executing it - catches typos the tests would miss.
+          Get-ChildItem *.ps1 | ForEach-Object {
+            $errs = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errs) | Out-Null
+            if ($errs) { $errs | ForEach-Object { Write-Host $_ }; throw "$($_.Name) failed to parse" }
+            Write-Host "ok  $($_.Name)"
+          }
+
+      - name: Asserts
+        shell: powershell
+        run: |
+          # -PureOnly skips the asserts that need real hardware (USB bus, live
+          # outbound connections). Everything else - secret patterns, posture
+          # diffing, private-net ranges - must pass on any Windows box.
+          .\test-snitch.ps1 -PureOnly
