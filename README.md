@@ -100,7 +100,7 @@ Every one of these has a better-resourced rival. Use them if you can install sof
 | This watcher | Do it properly with |
 |---|---|
 | mic/cam | **Windows 11 itself** — Settings → Privacy & security → Microphone → *Recent activity* already lists apps with timestamps, 7 days back. `snitch` adds a real-time toast and retention past 7 days. That is the whole delta. |
-| network diary | **[GlassWire](https://www.glasswire.com/)** (paid) has alerted on first network access for a decade. **[Portmaster](https://safing.io/)** is free, open source, and actually *blocks* at the kernel. `snitch` only narrates. |
+| network diary | **[GlassWire](https://www.glasswire.com/)** has alerted on first network access for a decade. **[Portmaster](https://safing.io/)** is free, open source, and actually *blocks* at the kernel. `snitch` only narrates. |
 | buskill | **[buskill-app](https://github.com/BusKill/buskill-app)** — free, open source, cross-platform, and pairs with real magnetic hardware. `snitch` just watches for the device to vanish. |
 | posture | **[Pareto Security](https://paretosecurity.com/)** — free, open source, on Windows, more checks, nicer UI. It reports state; `snitch` reports *change*. |
 | usb history | USBDeview, or Event Viewer, both free. |
