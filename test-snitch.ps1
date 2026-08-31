@@ -32,6 +32,16 @@ if (-not $PureOnly) {
     # A CI runner is a VM with no webcam and almost nothing on the USB bus.
     $usb = Get-UsbSet
     Check 'Get-UsbSet returns devices'  { $usb.Count -gt 0 }
+    # The regression this guards: Get-UsbSet used to read Enum\USB, a record of every
+    # device ever seen, so it reported long-gone hardware as attached and never saw a
+    # removal. Cross-checked against Get-PnpDevice, a deliberately different API - on
+    # the box where this was found the old reading was 17 against a true 5.
+    Check 'Get-UsbSet is present-only' {
+        $pfx = 'USB' + [char]92
+        $live = @(Get-PnpDevice -PresentOnly -ErrorAction Stop |
+                  Where-Object { $_.InstanceId -and $_.InstanceId.StartsWith($pfx) }).Count
+        $usb.Count -eq $live
+    }
     Check 'Get-UsbSet keys are VID\inst' { ($usb.Keys | Where-Object { $_ -match '^VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4}\\.+' }).Count -gt 0 }
 }
 Check 'Get-AvInUse returns a list'      { $null -ne @(Get-AvInUse) }

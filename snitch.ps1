@@ -19,6 +19,7 @@ param([switch]$Once, [switch]$ListUsb, [switch]$Posture, [switch]$Net, [switch]$
 
 $Cfg = @{
     IntervalSec     = 2
+    UsbRescanSec    = 30   # presence enumeration is ~700ms; indications trigger it sooner
     TetherUsbId     = ''   # BusKill: substring of a USB id from -ListUsb. Empty = off.
     ClipClearSec    = 30   # warn now, clear after this many seconds. 0 = warn only.
     PostureEverySec = 300  # posture drift is slow to check and slow to change
@@ -39,6 +40,7 @@ $LogFile = Join-Path $LogDir 'snitch.log'
 
 $DevSource = 'snitchDevChange'
 $script:DevWatch = $false
+$script:UsbDirty = $true      # first poll baselines
 
 $script:Quiet = $false                                        # aura.ps1 draws its own feed
 $script:Recent = New-Object 'System.Collections.Generic.List[string]'
@@ -86,19 +88,21 @@ function Get-AvInUse {
     $out | Sort-Object -Unique
 }
 
+# PRESENT devices only. This used to read HKLM\...\Enum\USB, which is a record of every
+# device the machine has EVER seen - the key survives removal - so diffing it never
+# detected an unplug at all, and only ever caught the first-ever plug of a given device.
+# Measured on one box: Enum\USB listed 17 devnodes where 5 were attached, the stale 12
+# including headphones and a mass-storage device that were long gone.
+#
+# Being correct costs ~700ms against the registry's ~15ms, which is why this is no
+# longer called every 2s - see UsbDirty in Invoke-Poll.
 function Get-UsbSet {
     $map = @{}
-    foreach ($vid in Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Enum\USB') {
-        try { $insts = Get-ChildItem $vid.PSPath } catch { continue }
-        foreach ($i in $insts) {
-            $p = Get-ItemProperty $i.PSPath
-            $desc = $p.FriendlyName
-            if (-not $desc) { $desc = $p.DeviceDesc }
-            if ($desc) { $desc = ($desc -split ';')[-1] }
-            $map["$($vid.PSChildName)\$($i.PSChildName)"] = [pscustomobject]@{
-                Desc = $desc; Service = $p.Service
-            }
-        }
+    $pfx = 'USB' + [char]92
+    foreach ($d in Get-CimInstance Win32_PnPEntity -ErrorAction Stop) {
+        $id = $d.PNPDeviceID
+        if (-not $id -or -not $id.StartsWith($pfx)) { continue }
+        $map[$id.Substring($pfx.Length)] = [pscustomobject]@{ Desc = $d.Name; Service = $d.Service }
     }
     $map
 }
@@ -293,7 +297,7 @@ function Wait-Interval([int]$Seconds) {
     while ((Get-Date) -lt $until) {
         if ($script:DevWatch) {
             $ev = @(Get-Event -SourceIdentifier $DevSource -ErrorAction Ignore)
-            if ($ev.Count) { $ev | Remove-Event; $early = $true; break }
+            if ($ev.Count) { $ev | Remove-Event; $script:UsbDirty = $true; $early = $true; break }
         }
         [System.Windows.Forms.Application]::DoEvents()
         Start-Sleep -Milliseconds 100
@@ -347,8 +351,23 @@ function Invoke-Poll {
     }
 
     if ($Cfg.WatchUsb -or $Cfg.TetherUsbId) {
-        $now = Get-UsbSet
-        if ($null -ne $script:PrevUsb) {
+        # ~700ms, so only when an indication says something changed - or every
+        # UsbRescanSec regardless, as the safety net for machines delivering none.
+        if ((-not $script:UsbNext) -or (Get-Date) -ge $script:UsbNext) { $script:UsbDirty = $true }
+    }
+    if (($Cfg.WatchUsb -or $Cfg.TetherUsbId) -and $script:UsbDirty) {
+        $script:UsbDirty = $false
+        $script:UsbNext = (Get-Date).AddSeconds($Cfg.UsbRescanSec)
+        $now = $null
+        try { $now = Get-UsbSet } catch { $now = $null }
+
+        # A failed or empty enumeration must never read as "everything was unplugged".
+        # With a tether armed that would lock the workstation over a WMI hiccup, and a
+        # real machine always has at least a root hub attached.
+        if ($null -eq $now -or $now.Count -eq 0) {
+            Write-Snitch 'USB' 'presence enumeration returned nothing - skipping this diff'
+        }
+        elseif ($null -ne $script:PrevUsb) {
             foreach ($id in $now.Keys | Where-Object { -not $script:PrevUsb.ContainsKey($_) }) {
                 $d = $now[$id]
                 $suspect = $d.Service -in 'HidUsb', 'kbdclass', 'kbdhid', 'USBSTOR', 'disk'
@@ -363,8 +382,9 @@ function Invoke-Poll {
                     rundll32.exe 'user32.dll,LockWorkStation'
                 }
             }
+            $script:PrevUsb = $now
         }
-        $script:PrevUsb = $now
+        else { $script:PrevUsb = $now }
     }
 
     if ($Cfg.WatchClip) {

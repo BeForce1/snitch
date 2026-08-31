@@ -11,8 +11,8 @@ software on.** If you can install things and have admin, use the dedicated tools
 | Watcher | What it does |
 |---|---|
 | **mic/cam** | Which app is on your microphone or camera *right now*, as a toast, plus an unbounded log. |
-| **usb** | Logs every device plugged in. Alerts loudly on new keyboards and storage — that's the BadUSB / O.MG cable shape. |
-| **buskill** | Tether a USB stick to your wrist. Yank the laptop away, it locks - within ~0.1s where Windows delivers a device-change indication, falling back to the 2s poll where it does not. |
+| **usb** | Logs every device plugged in *and pulled out*. Alerts loudly on new keyboards and storage — that's the BadUSB / O.MG cable shape. |
+| **buskill** | Tether a USB stick to your wrist. Yank the laptop away, it locks. Measured on real hardware: the device-change indication arrived **1,689 ms before** the 2s poll noticed the same unplug. |
 | **clipboard** | Spots private keys, AWS/GitHub/Slack/Google/API keys and JWTs on your clipboard, warns, then clears them. |
 | **session** | Lock and unlock log. "Your laptop was unlocked at 3:14am." |
 | **posture drift** | 11 read-only checks — firewall, Secure Boot, UAC, RDP, SMB1, Defender, patch age, lock screen, autologon, BitLocker. Alerts only when one **changes**. |
@@ -31,7 +31,7 @@ software on.** If you can install things and have admin, use the dedicated tools
   w a t c h d o g      mic cam usb clip lock
 
   [1] mic / cam .......... ON    LIVE: microphone
-  [2] usb devices ........ ON    39 devices
+  [2] usb devices ........ ON    5 attached
   [3] clipboard .......... ON    clear after 30s
   [4] session lock ....... ON    unlocked
   [5] buskill ............ OFF   no tether armed
@@ -55,7 +55,7 @@ software on.** If you can install things and have admin, use the dedicated tools
 .\snitch.ps1 -ListUsb     # print USB ids
 .\snitch.ps1 -Posture     # print all 11 posture checks and exit
 .\snitch.ps1 -Net         # print every current outbound connection by process
-.\test-snitch.ps1         # 39 asserts
+.\test-snitch.ps1         # 40 asserts
 ```
 
 Press `5` in the console to arm BusKill — it waits for you to plug the tether in
@@ -112,7 +112,9 @@ as opposed to posture state. Those two are the genuinely new bits.
 
 Deliberate, in exchange for needing no admin rights and no drivers:
 
-- **Polls every 2s, but device changes jump the queue.** A cycle costs 80-140ms measured (USB set ~20ms, mic/cam ~50ms, clipboard and lock check the rest), so under 7% of a core. A `Win32_DeviceChangeEvent` subscription cuts the wait short in 100ms slices - it is an *extrinsic* event, genuinely pushed by the provider rather than polled behind a `WITHIN` clause, and it registers as a plain non-admin user. `Win32_VolumeChangeEvent` is a subclass, so drive arrivals arrive on the same query.
+- **USB presence comes from `Win32_PnPEntity`, not the registry.** `HKLM\...\Enum\USB` is a record of every device the machine has ever seen - the key survives removal - so diffing it never detects an unplug at all, and only ever catches the first-ever plug of a given device. On the machine this was found on it listed **17 devnodes where 5 were attached**, the stale twelve including headphones and a mass-storage device long since gone. Being right costs ~700ms against the registry's ~15ms, so the enumeration runs when an indication says something changed, or every `UsbRescanSec` (30s) otherwise - not every 2s.
+- **A failed or empty enumeration is never read as "everything was unplugged."** With a tether armed that would lock the workstation over a transient WMI hiccup, so the diff is skipped instead.
+- **Polls every 2s, but device changes jump the queue.** Measured on a real mouse unplug: indication at +58,322ms, poll detection at +60,011ms - **1,689ms earlier**. A cycle costs 80-140ms measured (USB set ~20ms, mic/cam ~50ms, clipboard and lock check the rest), so under 7% of a core. A `Win32_DeviceChangeEvent` subscription cuts the wait short in 100ms slices - it is an *extrinsic* event, genuinely pushed by the provider rather than polled behind a `WITHIN` clause, and it registers as a plain non-admin user. `Win32_VolumeChangeEvent` is a subclass, so drive arrivals arrive on the same query.
 - **The indication decides when to look, never what is true.** The 2s registry diff stays the only authority on what actually changed, so a machine that never delivers an indication behaves exactly as it did before and waits the full interval. That fallback is asserted in the test suite rather than assumed. A device plugged *and* pulled inside one cycle with no indication is still invisible.
 - **No failed-login detection.** Events 4625/4776 live in the Security log, which needs admin. Lock/unlock is inferred from `LogonUI.exe` instead.
 - **Clipboard is text-only,** and matched by regex rather than entropy. Copy a secret as an image and nothing happens.
