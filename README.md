@@ -12,11 +12,23 @@ software on.** If you can install things and have admin, use the dedicated tools
 |---|---|
 | **mic/cam** | Which app is on your microphone or camera *right now*, as a toast, plus an unbounded log. |
 | **usb** | Logs every device plugged in *and pulled out*. Alerts loudly on new keyboards and storage — that's the BadUSB / O.MG cable shape. |
-| **buskill** | Tether a USB stick to your wrist. Yank the laptop away, it locks. Measured on real hardware: the device-change indication arrived **1,689 ms before** the 2s poll noticed the same unplug. |
+| **buskill** | Tether a USB stick to your wrist. Yank the laptop away, it locks. |
 | **clipboard** | Spots private keys, AWS/GitHub/Slack/Google/API keys and JWTs on your clipboard, warns, then clears them. |
 | **session** | Lock and unlock log. "Your laptop was unlocked at 3:14am." |
 | **posture drift** | 11 read-only checks — firewall, Secure Boot, UAC, RDP, SMB1, Defender, patch age, lock screen, autologon, BitLocker. Alerts only when one **changes**. |
 | **network diary** | Outbound connections by process. Toasts the first time a program ever phones home. |
+
+## Install
+
+No installer, no admin, nothing to compile — PowerShell 5.1 ships with Windows:
+
+```powershell
+git clone https://github.com/BeForce1/snitch && cd snitch
+Get-ChildItem *.ps1 | Unblock-File    # clears the downloaded-from-internet flag
+.\aura.ps1
+```
+
+If script execution is blocked: `powershell -ExecutionPolicy Bypass -File .\aura.ps1`
 
 ## Run
 
@@ -112,20 +124,31 @@ as opposed to posture state. Those two are the genuinely new bits.
 
 Deliberate, in exchange for needing no admin rights and no drivers:
 
-- **USB presence comes from `Win32_PnPEntity`, not the registry.** `HKLM\...\Enum\USB` is a record of every device the machine has ever seen - the key survives removal - so diffing it never detects an unplug at all, and only ever catches the first-ever plug of a given device. On the machine this was found on it listed **17 devnodes where 5 were attached**, the stale twelve including headphones and a mass-storage device long since gone. Being right costs ~700ms against the registry's ~15ms, so the enumeration runs when an indication says something changed, or every `UsbRescanSec` (30s) otherwise - not every 2s.
-- **A failed or empty enumeration is never read as "everything was unplugged."** With a tether armed that would lock the workstation over a transient WMI hiccup, so the diff is skipped instead.
-- **Polls every 2s, but device changes jump the queue.** Measured on a real mouse unplug: indication at +58,322ms, poll detection at +60,011ms - **1,689ms earlier**. A cycle costs 80-140ms measured (USB set ~20ms, mic/cam ~50ms, clipboard and lock check the rest), so under 7% of a core. A `Win32_DeviceChangeEvent` subscription cuts the wait short in 100ms slices - it is an *extrinsic* event, genuinely pushed by the provider rather than polled behind a `WITHIN` clause, and it registers as a plain non-admin user. `Win32_VolumeChangeEvent` is a subclass, so drive arrivals arrive on the same query.
-- **The indication decides when to look, never what is true.** The 2s registry diff stays the only authority on what actually changed, so a machine that never delivers an indication behaves exactly as it did before and waits the full interval. That fallback is asserted in the test suite rather than assumed. A device plugged *and* pulled inside one cycle with no indication is still invisible.
-- **No failed-login detection.** Events 4625/4776 live in the Security log, which needs admin. Lock/unlock is inferred from `LogonUI.exe` instead.
-- **Clipboard is text-only,** and matched by regex rather than entropy. Copy a secret as an image and nothing happens.
-- **Clipboard contents are never logged or stored** — only a hash, to notice when the clipboard changes. The log records the pattern name only.
+**USB**
+- **Presence comes from `Win32_PnPEntity`, not `Enum\USB`.** That registry key records every device ever seen and survives removal, so diffing it never detects an unplug — one machine listed 17 devnodes where 5 were attached. Being right costs ~700ms against ~15ms.
+- **Device changes jump the 2s queue.** A `Win32_DeviceChangeEvent` subscription — extrinsic, so genuinely pushed, and it registers without admin — cuts the wait in 100ms slices. Measured on a real unplug: the indication landed **1,689ms** before the poll saw it.
+- **The indication decides when to look, never what is true.** The diff stays the only authority, so a machine that delivers none behaves exactly as before. Asserted in the tests, not assumed.
+- **An empty or failed enumeration is never read as "everything was unplugged"** — with a tether armed that would lock the workstation over a transient WMI hiccup.
+- **A poll cycle costs 80-140ms**, under 7% of a core. A device plugged *and* pulled inside one cycle with no indication is still missed.
 - **BusKill only locks.** It does not wipe, unmount, or kill processes.
-- **BitLocker status needs admin** — reported as `needs admin` rather than guessed. Without elevation the API takes 5.7s to fail, so it isn't even attempted.
-- **Posture is checked every 5 minutes,** not every 2s, and posture does not move quickly. Signature and patch ages are bucketed to `ok`/`stale` so an ordinary passing day isn't reported as drift.
-- **`Get-HotFix` is cached for 12 hours.** It alone was ~1.5s of a ~1.9s posture pass, which is absurd for something re-run every 5 minutes when patches land at most daily. Measured after caching: **2,208ms on the first pass, then 108-145ms.** The *date* is cached rather than the bucket, so `ok` still flips to `stale` on the right day without a re-query. Cost: a patch installed mid-window shows up within 12h, not instantly. (`Get-MpComputerStatus`, long assumed to be the other expensive one, measured ~100ms — it was never the problem.)
+
+**Posture**
+- **Checked every 5 minutes.** Signature and patch ages bucket to `ok`/`stale`, so an ordinary passing day isn't reported as drift.
+- **`Get-HotFix` is cached for 12h** — it alone was ~1.5s of a ~1.9s pass. Now 2,208ms on the first pass, then 108-145ms. The *date* is cached, not the bucket, so `ok` still flips to `stale` on the right day. (`Get-MpComputerStatus`, long assumed to be the other expensive one, measured ~100ms.)
+- **BitLocker needs admin** — reported as `needs admin` rather than guessed; the API takes 5.7s to fail without elevation, so it isn't attempted.
 - **Baseline lives in** `%LOCALAPPDATA%\snitch\posture.json`. Delete it to re-baseline.
-- **`snitch.log` is never rotated.** That is the point — it outlives the 7 days Windows keeps — but nothing trims it either. Delete it yourself.
-- **The network diary does no reverse DNS.** `GetHostEntry` took 4.5s to return *no PTR* on a live IP, so destinations are raw `ip:port`. There is no ASN lookup either — that would mean calling out to a third party about your own traffic.
-- **Two tiers on purpose.** One browser touches dozens of rotating CDN IPs, so per-IP toasts would be unusable. Process names persist across restarts (`netdiary.txt`); destinations are per-session, so a restart doesn't re-report every live connection as new.
-- **TCP only, established only.** UDP has no remote peer to record for most sockets — that's what a DNS log would be for.
-- **Checked every 30s.** `Get-NetTCPConnection` measured ~190ms warm and ~700ms on the first call of a session; the whole `Get-NetOut` pass including process-name mapping is ~230ms. A connection opened and closed inside that window is missed.
+
+**Network**
+- **Checked every 30s.** `Get-NetTCPConnection` measured ~190ms warm, ~700ms on the first call. A connection opened and closed inside that window is missed.
+- **No reverse DNS.** `GetHostEntry` took 4.5s to return *no PTR* on a live IP. No ASN lookup either — that would mean telling a third party about your own traffic.
+- **Two tiers.** A new *process* phoning home toasts; a new destination is only a log line, because one browser touches dozens of rotating CDN IPs.
+- **TCP only, established only.**
+
+**Other**
+- **No failed-login detection.** Events 4625/4776 need admin. Lock/unlock is inferred from `LogonUI.exe`.
+- **Clipboard is text-only** and regex-matched rather than entropy-scored. Contents are never logged or stored — only a hash, to notice when it changes.
+- **`snitch.log` is never rotated.** That is the point, it outlives the 7 days Windows keeps — but nothing trims it either.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
