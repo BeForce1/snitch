@@ -112,15 +112,17 @@ as opposed to posture state. Those two are the genuinely new bits.
 
 Deliberate, in exchange for needing no admin rights and no drivers:
 
-- **Polls every 2s** instead of subscribing to events. Registry enumeration costs ~30ms, so this is cheap, but a device plugged and pulled inside 2s is invisible.
+- **Polls every 2s** instead of subscribing to events. A cycle costs 80-140ms measured (USB set ~20ms, mic/cam ~50ms, clipboard and lock check the rest), so under 7% of a core, but a device plugged and pulled inside 2s is invisible.
 - **No failed-login detection.** Events 4625/4776 live in the Security log, which needs admin. Lock/unlock is inferred from `LogonUI.exe` instead.
 - **Clipboard is text-only,** and matched by regex rather than entropy. Copy a secret as an image and nothing happens.
 - **Clipboard contents are never logged or stored** — only a hash, to notice when the clipboard changes. The log records the pattern name only.
 - **BusKill only locks.** It does not wipe, unmount, or kill processes.
 - **BitLocker status needs admin** — reported as `needs admin` rather than guessed. Without elevation the API takes 5.7s to fail, so it isn't even attempted.
-- **Posture is checked every 5 minutes,** not every 2s. A pass costs ~1.9s (Defender and hotfix queries dominate) and posture does not move quickly. Signature and patch ages are bucketed to `ok`/`stale` so an ordinary passing day isn't reported as drift.
+- **Posture is checked every 5 minutes,** not every 2s, and posture does not move quickly. Signature and patch ages are bucketed to `ok`/`stale` so an ordinary passing day isn't reported as drift.
+- **`Get-HotFix` is cached for 12 hours.** It alone was ~1.5s of a ~1.9s posture pass, which is absurd for something re-run every 5 minutes when patches land at most daily. Measured after caching: **2,208ms on the first pass, then 108-145ms.** The *date* is cached rather than the bucket, so `ok` still flips to `stale` on the right day without a re-query. Cost: a patch installed mid-window shows up within 12h, not instantly. (`Get-MpComputerStatus`, long assumed to be the other expensive one, measured ~100ms — it was never the problem.)
 - **Baseline lives in** `%LOCALAPPDATA%\snitch\posture.json`. Delete it to re-baseline.
+- **`snitch.log` is never rotated.** That is the point — it outlives the 7 days Windows keeps — but nothing trims it either. Delete it yourself.
 - **The network diary does no reverse DNS.** `GetHostEntry` took 4.5s to return *no PTR* on a live IP, so destinations are raw `ip:port`. There is no ASN lookup either — that would mean calling out to a third party about your own traffic.
 - **Two tiers on purpose.** One browser touches dozens of rotating CDN IPs, so per-IP toasts would be unusable. Process names persist across restarts (`netdiary.txt`); destinations are per-session, so a restart doesn't re-report every live connection as new.
 - **TCP only, established only.** UDP has no remote peer to record for most sockets — that's what a DNS log would be for.
-- **Checked every 30s.** `Get-NetTCPConnection` is ~380ms. A connection opened and closed inside that window is missed.
+- **Checked every 30s.** `Get-NetTCPConnection` measured ~190ms warm and ~700ms on the first call of a session; the whole `Get-NetOut` pass including process-name mapping is ~230ms. A connection opened and closed inside that window is missed.

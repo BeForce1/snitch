@@ -1,15 +1,19 @@
 <#
-  snitch.ps1 - five small Windows watchdogs in one tray app. No admin, no dependencies.
+  snitch.ps1 - seven small Windows watchdogs in one tray app. No admin, no dependencies.
 
     mic/cam in use    who is listening/watching, right now, with history
     usb insert        every device plugged in, flags new keyboards (BadUSB)
     buskill           yank the tethered USB stick -> workstation locks
     clipboard guard   secrets on the clipboard get warned about and cleared
     session watch     lock / unlock log
+    posture drift     11 read-only security checks, alerts only on change
+    network diary     outbound connections by process, toasts a new one
 
   Usage:  .\snitch.ps1              run
           .\snitch.ps1 -Once        one poll cycle, then exit
           .\snitch.ps1 -ListUsb     print USB ids (to pick a BusKill tether)
+          .\snitch.ps1 -Posture     print all 11 posture checks, then exit
+          .\snitch.ps1 -Net         print current outbound connections, then exit
 #>
 param([switch]$Once, [switch]$ListUsb, [switch]$Posture, [switch]$Net, [switch]$NoRun)
 
@@ -105,8 +109,20 @@ function Get-RegVal([string]$Path, [string]$Name) {
     try { (Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop).$Name } catch { $null }
 }
 
-# Registry over cmdlets wherever possible: Get-NetFirewallProfile is 1.4s, the
-# registry is 47ms. Ages are bucketed to ok/stale so a passing day isn't "drift".
+# Get-HotFix is ~1.5s of a ~1.9s posture pass and patches land at most once a day, so
+# it does not belong in something that runs every 5 minutes. Cache the date, not the
+# bucket, so 'ok' -> 'stale' still flips on the right day without a re-query. The expiry
+# is set before the call, so a machine where Get-HotFix throws doesn't retry every pass.
+function Get-PatchDate {
+    if ($script:PatchUntil -and (Get-Date) -lt $script:PatchUntil) { return $script:PatchDate }
+    $script:PatchUntil = (Get-Date).AddHours(12)
+    try { $script:PatchDate = (Get-HotFix | Sort-Object InstalledOn -Descending)[0].InstalledOn }
+    catch { $script:PatchDate = $null }
+    $script:PatchDate
+}
+
+# Registry over cmdlets wherever possible: Get-NetFirewallProfile measured 2.2s, the
+# registry read 57ms cold and ~7ms warm. Ages are bucketed to ok/stale so a passing day isn't "drift".
 function Get-Posture {
     $p = [ordered]@{}
 
@@ -135,11 +151,12 @@ function Get-Posture {
     }
     catch { $p['defender_rtp'] = 'unknown'; $p['defender_sig'] = 'unknown' }
 
-    try {
-        $days = [int]((Get-Date) - (Get-HotFix | Sort-Object InstalledOn -Descending)[0].InstalledOn).TotalDays
+    $pd = Get-PatchDate
+    if ($pd) {
+        $days = [int]((Get-Date) - $pd).TotalDays
         $p['last_patch'] = if ($days -le 45) { 'ok' } else { 'stale ({0}d)' -f $days }
     }
-    catch { $p['last_patch'] = 'unknown' }
+    else { $p['last_patch'] = 'unknown' }
 
     # ponytail: BitLocker needs admin and burns 5.7s failing without it. Don't ask.
     if (-not $script:IsAdmin) { $p['bitlocker'] = 'needs admin' }
