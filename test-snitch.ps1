@@ -69,5 +69,28 @@ if (-not $PureOnly) { Check 'Get-NetOut returns pairs' { $nout.Count -gt 0 } }
 Check 'keys are proc|ip:port'    { ($nout.Keys | Where-Object { $_ -match '^.+\|[0-9a-fA-F:.]+:\d+$' }).Count -eq $nout.Count }
 Check 'no private dests leak'    { ($nout.Keys | Where-Object { ($_ -split '\|')[1] -match $PrivateNet }).Count -eq 0 }
 
+'Device events:'
+# Windows firing an indication on real hardware cannot be triggered from a test, so
+# these drive the reaction path with a synthetic event on the same source identifier.
+# Timings are deliberately loose - a CI runner is not a real-time system.
+Check 'Start-DeviceWatch returns bool' { (Start-DeviceWatch) -is [bool] }
+Check 'no event -> waits it out'       {
+    $sw = [Diagnostics.Stopwatch]::StartNew(); $r = Wait-Interval 1; $sw.Stop()
+    (-not $r) -and $sw.ElapsedMilliseconds -ge 900
+}
+Check 'queued event -> returns early'  {
+    New-Event -SourceIdentifier 'snitchDevChange' -Sender 'test' | Out-Null
+    $sw = [Diagnostics.Stopwatch]::StartNew(); $r = Wait-Interval 10; $sw.Stop()
+    $r -and $sw.ElapsedMilliseconds -lt 1000
+}
+Check 'queue drained after firing'     {
+    $sw = [Diagnostics.Stopwatch]::StartNew(); $r = Wait-Interval 1; $sw.Stop()
+    (-not $r) -and $sw.ElapsedMilliseconds -ge 900
+}
+Check 'Stop-DeviceWatch unsubscribes'  {
+    Stop-DeviceWatch
+    -not [bool](Get-EventSubscriber -SourceIdentifier 'snitchDevChange' -Force -ErrorAction Ignore)
+}
+
 ''
 if ($fail) { "$fail FAILED"; exit 1 } else { 'all passed'; exit 0 }

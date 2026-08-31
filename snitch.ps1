@@ -37,6 +37,9 @@ $script:IsAdmin = (New-Object Security.Principal.WindowsPrincipal(
 $LogDir = Join-Path $env:LOCALAPPDATA 'snitch'
 $LogFile = Join-Path $LogDir 'snitch.log'
 
+$DevSource = 'snitchDevChange'
+$script:DevWatch = $false
+
 $script:Quiet = $false                                        # aura.ps1 draws its own feed
 $script:Recent = New-Object 'System.Collections.Generic.List[string]'
 
@@ -254,6 +257,50 @@ function Test-PostureDrift {
     ($now | ConvertTo-Json) | Set-Content $file -Encoding utf8
 }
 
+# --- device events ----------------------------------------------------------
+# Win32_DeviceChangeEvent is extrinsic: the provider pushes it, so the query needs no
+# WITHIN clause and nothing polls behind the scenes. Verified to register as a plain
+# non-admin user. Win32_VolumeChangeEvent is a subclass, so this catches those too.
+#
+# ponytail: the indication only decides *when* to look, never what is true. Invoke-Poll
+# and its registry diff stay the sole authority, so a box where this never fires behaves
+# exactly as it did before - it just waits the full 2s like it always did.
+function Start-DeviceWatch {
+    try {
+        Get-EventSubscriber -SourceIdentifier $DevSource -Force -ErrorAction Ignore |
+            Unregister-Event -Force -ErrorAction Ignore
+        Register-CimIndicationEvent -Query 'SELECT * FROM Win32_DeviceChangeEvent' `
+            -SourceIdentifier $DevSource -ErrorAction Stop
+        $script:DevWatch = $true
+    }
+    catch { $script:DevWatch = $false }
+    $script:DevWatch
+}
+
+function Stop-DeviceWatch {
+    if (-not $script:DevWatch) { return }
+    Get-Event -SourceIdentifier $DevSource -ErrorAction Ignore | Remove-Event
+    Unregister-Event -SourceIdentifier $DevSource -Force -ErrorAction Ignore
+    $script:DevWatch = $false
+}
+
+# Sleep out the interval in 100ms slices, returning early the moment a device change
+# lands. That is the whole BusKill win: yank the tether and the lock happens within
+# ~0.1s instead of up to 2s.
+function Wait-Interval([int]$Seconds) {
+    $until = (Get-Date).AddSeconds($Seconds)
+    $early = $false
+    while ((Get-Date) -lt $until) {
+        if ($script:DevWatch) {
+            $ev = @(Get-Event -SourceIdentifier $DevSource -ErrorAction Ignore)
+            if ($ev.Count) { $ev | Remove-Event; $early = $true; break }
+        }
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 100
+    }
+    $early
+}
+
 # --- output -----------------------------------------------------------------
 function Write-Snitch([string]$Tag, [string]$Msg) {
     $line = '{0}  {1,-5} {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Tag, $Msg
@@ -389,14 +436,17 @@ function Main {
 
     if ($Once) { Invoke-Poll; $script:Tray.Dispose(); return }
 
+    if (Start-DeviceWatch) { Write-Snitch 'BOOT' 'device events armed - usb changes react in ~0.1s' }
+    else { Write-Snitch 'BOOT' 'device events unavailable - falling back to the 2s poll' }
+
     try {
         while ($true) {
             Invoke-Poll
             [System.Windows.Forms.Application]::DoEvents()
-            Start-Sleep -Seconds $Cfg.IntervalSec
+            Wait-Interval $Cfg.IntervalSec | Out-Null
         }
     }
-    finally { $script:Tray.Dispose() }
+    finally { Stop-DeviceWatch; $script:Tray.Dispose() }
 }
 
 if (-not $NoRun) { Main }
